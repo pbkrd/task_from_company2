@@ -72,7 +72,7 @@ def get_pastebin_client():
 
 def query_handler(clickhouse_cl, query_context):
     with Redis() as redis_client:
-        task = json.loads(redis_client.rpop('tasks'))
+        task = json.loads(redis_client.brpop('tasks'))
 
     ipv4, mac = task.get('ipv4'), task.get('mac')
 
@@ -110,11 +110,3 @@ if __name__ == '__main__':
                 args=(ch_client, qc),
                 callback=send_json_on_pastebin
             )
-
-
-# Сделать проверку ip и Mac через шаблон re или перехватывать ошибку некорректных данных
-# Ошибки, корнер кейсы и т.п.
-# Очереди redis
-# readme.md
-# залить на github
-# Тестирование на WSL
