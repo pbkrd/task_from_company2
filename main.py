@@ -1,8 +1,14 @@
 import json
-import multiprocessing
+import os
+from ipaddress import ip_address
+from time import sleep
+
+import urllib3
+from multiprocessing import Pool, cpu_count
 from random import randint
 
 import clickhouse_connect
+from clickhouse_connect.driver.exceptions import OperationalError
 from pbwrap import Pastebin
 from random_username.generate import generate_username
 from redis.client import Redis
@@ -15,11 +21,15 @@ PB_USERNAME = config['API_PB_KEY']
 PB_PASSWORD = config['API_PB_KEY']
 
 CPU_LOAD = 3
-NUMBER_CH = 1000
-PATH_RESULT = 'result.txt'
+NUMBER_DATA_CH = 1000
+TABLE_NAME = 'test_table'
+QUEUE_NAME = 'tasks'
+TIMEOUT_QUEUE = 0
+OUT_FILE = 'result.txt'
+PATH_TO_FILE = f'{os.getcwd()}/{OUT_FILE}'
 
 
-def generate_rand_ipv4s(n) -> list:
+def generate_rand_ipv4s(n):
     # ips = ['.'.join(str(randint(0, 255)) for _ in range(4)) for _ in range(n)]
     ips = []
     for _ in range(n):
@@ -35,50 +45,77 @@ def generate_randint_macs(n):
 
 
 def generate_ch_data():
-    usernames = generate_username(NUMBER_CH)
-    ipv4s = generate_rand_ipv4s(NUMBER_CH)
-    int_macs = generate_randint_macs(NUMBER_CH)
+    usernames = generate_username(NUMBER_DATA_CH)
+    ipv4s = generate_rand_ipv4s(NUMBER_DATA_CH)
+    int_macs = generate_randint_macs(NUMBER_DATA_CH)
     data = [*zip(usernames, ipv4s, int_macs)]
     return data
 
 
-def get_clickhouse_client(query_context=False):
-    ch_client = clickhouse_connect.get_client(host='localhost')
+def get_clickhouse_client():
+    ch_client = None
+    while ch_client is None:
+        try:
+            ch_client = clickhouse_connect.get_client(host='localhost')
+        except (urllib3.exceptions.MaxRetryError, OperationalError):
+            print('ClickHouse недоступен')
+            sleep(60)
 
-    if not query_context:
-        return ch_client
-
-    qc = ch_client.create_query_context(
-        query='SELECT username FROM test_table WHERE ipv4 = {ipv4:IPv4} AND mac = MACStringToNum({mac:String})',
-        parameters={'ipv4': None, 'mac': None},
-        column_oriented=True
-    )
-    return ch_client, qc
+    return ch_client
 
 
 def create_ch_test_table(ch_client, data):
-    ch_client.command('DROP TABLE IF EXISTS test_table')  # Можно добавить название table in config
+    ch_client.command(f'DROP TABLE IF EXISTS {TABLE_NAME}')
     ch_client.command(
-        'CREATE TABLE test_table (username String, ipv4 IPv4, mac UInt64) ENGINE MergeTree ORDER BY username')
+        'CREATE TABLE test_table (username String, ipv4 IPv4, mac UInt64)'
+        'ENGINE MergeTree ORDER BY username'
+    )
     ch_client.command('SHOW DATABASES')
     ch_client.insert('test_table', data, column_names=['username', 'ipv4', 'mac'])
 
 
 def get_pastebin_client():
-    pb = Pastebin(API_PB_KEY)
-    pb.authenticate(PB_USERNAME, PB_PASSWORD)
-    return pb
+    pb_client = None
+    while pb_client is None:
+        try:
+            pb_client = Pastebin(API_PB_KEY)
+            pb_client.authenticate(PB_USERNAME, PB_PASSWORD)
+        except urllib3.exceptions.MaxRetryError:
+            print('Pastebin недоступен')
+            sleep(60)
+
+    return pb_client
 
 
-def query_handler(clickhouse_cl, query_context):
+def is_valid_ip(ip_string):
+    if not isinstance(ip_string, str):
+        return False
+    try:
+        return bool(ip_address(ip_string))
+    except ValueError:
+        return False
+
+
+def is_valid_mac(mac_string, sep=':'):
+    if not isinstance(mac_string, str):
+        return False
+    return int(mac_string.replace(sep, ''), 16) <= 16 ** 12
+
+
+def query_handler():
+    ch_client = get_clickhouse_client()
+
     with Redis() as redis_client:
-        task = json.loads(redis_client.brpop('tasks'))
+        _, task = redis_client.brpop(QUEUE_NAME, timeout=TIMEOUT_QUEUE)
+        task = json.loads(task)
 
     ipv4, mac = task.get('ipv4'), task.get('mac')
 
-    if isinstance(ipv4, str) and isinstance(mac, str):
-        qc.set_parameters({'ipv4': ipv4, 'mac': mac})
-        result = clickhouse_cl.query(context=query_context).result_set
+    if is_valid_ip(ipv4) and is_valid_mac(mac):  # Разобраться с валидаторами CH
+        result = ch_client.query(
+            f'SELECT username FROM test_table '
+            f'WHERE ipv4 = {ipv4} AND mac = MACStringToNum({mac})'
+        ).result_set
         if result:
             report = {"username": result[0][0], "ipv4": ipv4, "mac": mac}
             return report
@@ -94,19 +131,18 @@ def send_json_on_pastebin(response):
             api_paste_expire_date='2M',
             api_paste_format='json'
         )
-        with open(PATH_RESULT, 'a', encoding='utf-8') as result_file:
-            result_file.write(url)
+        with open(PATH_TO_FILE, 'a', encoding='utf-8') as result_file:
+            result_file.write(url + '\n')
     return
 
 
 if __name__ == '__main__':
-    ch_client, qc = get_clickhouse_client(query_context=True)
-    create_ch_test_table(ch_client, generate_ch_data())
+    create_ch_test_table(get_clickhouse_client(), generate_ch_data())
 
     while True:
-        with multiprocessing.Pool(multiprocessing.cpu_count() * CPU_LOAD) as pool:
+        with Pool(cpu_count() * CPU_LOAD) as pool:
             pool.apply_async(
                 query_handler,
-                args=(ch_client, qc),
+                args=tuple(),
                 callback=send_json_on_pastebin
             )
