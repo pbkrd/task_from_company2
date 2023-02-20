@@ -20,7 +20,7 @@
 
     echo "deb https://packages.clickhouse.com/deb stable main" | sudo tee /etc/apt/sources.list.d/clickhouse.list
     sudo apt-get update
-
+<!-- БЕЗ ПАРОЛЯ-->
     sudo apt-get install -y clickhouse-server clickhouse-client
 
     sudo service clickhouse-server start
