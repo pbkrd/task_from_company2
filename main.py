@@ -1,11 +1,10 @@
 import json
+import urllib3
 import os
 from ipaddress import ip_address
-from time import sleep
-
-import urllib3
 from multiprocessing import Pool, cpu_count
 from random import randint
+from time import sleep
 
 import clickhouse_connect
 from clickhouse_connect.driver.exceptions import OperationalError
