@@ -138,10 +138,11 @@ def send_json_on_pastebin(response):
 if __name__ == '__main__':
     create_ch_test_table(get_clickhouse_client(), generate_ch_data())
 
-    while True:
-        with Pool(cpu_count() * CPU_LOAD) as pool:
+    with Pool(cpu_count() * CPU_LOAD) as pool:
+        while True:
             pool.apply_async(
                 query_handler,
                 args=tuple(),
                 callback=send_json_on_pastebin
             )
+        
